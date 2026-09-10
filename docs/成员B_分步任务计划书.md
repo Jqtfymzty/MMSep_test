@@ -1,0 +1,776 @@
+# 模块一 成员 B 分步任务计划书
+
+> 适用角色：成员 B
+> 仓库根目录：`C:\Users\Administrator\OneDrive\Desktop\课程任务\软件质量测试\MMSep_test`
+> 分工依据：`docs/模块一分工方案.md`
+> 远程：`origin → https://github.com/Jqtfymzty/MMSep_test.git`
+
+---
+
+## 0. 任务范围确认
+
+### 0.1 我（成员 B）负责的被测模块
+
+| 被测文件 | 具体被测对象 | 用例下限 |
+|---|---|---|
+| `cache.py` | **压缩功能**：`compress_past_win_2_seps()`、`compress_kv_cache_and_tokids_layer_wise()`、`compress_kv_cache_and_tokids_noimg_layer_wise()`、`update()` | ≥ 8 条 |
+| `mm_separators.py` | `graph_rank_separators()` 全部行为 | ≥ 7 条 |
+
+### 0.2 具体测试点（逐条对应分工方案）
+
+**`cache.py` 压缩功能**
+
+- [ ] `compress_past_win_2_seps()`：无分隔符 / 单个分隔符 / 多个分隔符
+- [ ] `SEP_PADDING_IN_BATCH=True/False` 时不同 batch 分隔符数量的 padding 与截断
+- [ ] `compress_kv_cache_and_tokids_layer_wise()`
+- [ ] `compress_kv_cache_and_tokids_noimg_layer_wise()`
+- [ ] 初始 cache / separator cache / local cache 的长度与拼接顺序
+- [ ] `SEP_ACCUMULATION`、`USE_MAX_SEP_CACHE`、缓存达到上限后的行为
+- [ ] `update()` 在普通 token / 文本分隔符 / 预填充阶段 / 视觉召回时返回的 KV cache
+
+**`mm_separators.py`**
+
+- [ ] 注意力排序后是否保留指定数量的视觉 token
+- [ ] 保留 token 是否保持原始顺序、`visual_sep_pos` 是否正确
+- [ ] `position_ids`、`attention_mask`、特征长度是否同步更新
+- [ ] 无图像 token、不同视觉 token 数量、不同 batch、padding 场景
+- [ ] 非法 `image_token_posi`、空 mask、边界序列长度
+
+### 0.3 我的交付物
+
+| # | 交付物 | 验收标准 |
+|---|---|---|
+| 1 | `tests/test_cache_compress.py` | `cache.py` 压缩功能测试代码 |
+| 2 | `tests/test_mm_separators.py` | `mm_separators.py` 测试代码 |
+| 3 | `tests/conftest.py`（tensor fixture 部分） | 小尺寸固定 tensor，CPU 可跑 |
+| 4 | 测试用例清单条目 | **≥ 15 条**，写入附录 1 Excel |
+| 5 | 有效缺陷及修复验证 | **≥ 2 个**，含现象 / 复现步骤 / 修复验证 |
+| 6 | 执行结果记录 | 通过数 / 失败数 / 环境信息 |
+
+### 0.4 与成员 A 的边界
+
+| 事项 | 归属 |
+|---|---|
+| `software_test.py` 一键运行入口 | **成员 A 主责**（我需确认能跑通我的用例） |
+| `auto_eval.py` 测试 + JSONL 样例 | 成员 A |
+| `cache.py` 基础功能（初始化、读写、魔术方法） | 成员 A |
+| `cache.py` 压缩功能 | **我** |
+| `mm_separators.py` | **我** |
+| `tests/conftest.py` | 共用文件，**按内容分段各自编写**，避免互相覆盖 |
+
+> ⚠️ `conftest.py` 是两人共用文件，务必与成员 A 约定：我写 `cache_compress_*` / `mmsep_*` 前缀的 fixture，成员 A 写 `eval_*` / `basic_*` 前缀，避免命名冲突与内容覆盖。
+
+---
+
+## 1. 前置状态判断与分支处理
+
+### 1.1 本地仓库是否已初始化
+
+**判断方法**
+
+```bash
+cd "C:\Users\Administrator\OneDrive\Desktop\课程任务\软件质量测试\MMSep_test"
+git rev-parse --is-inside-work-tree
+```
+
+或 VS Code：左侧「源代码管理」面板（Ctrl+Shift+G）若显示文件列表即为已初始化，若显示"未找到存储库"则为未初始化。
+
+| 状态 | 处理方式 |
+|---|---|
+| **已初始化**（输出 `true`） | 跳过本节，进入 1.2。当前仓库**已确认已初始化**（存在 `.git` 目录） |
+| **未初始化**（报错 `not a git repository`） | VS Code：源代码管理面板 →「初始化存储库」；或命令 `git init`，然后接 1.2 |
+
+### 1.2 是否已关联远程 origin
+
+**判断方法**
+
+```bash
+git remote -v
+```
+
+| 状态 | 处理方式 |
+|---|---|
+| **已关联**（当前状态） | 输出 `origin https://github.com/Jqtfymzty/MMSep_test.git`，跳过 |
+| **未关联**（无输出） | `git remote add origin https://github.com/Jqtfymzty/MMSep_test.git`，再 `git fetch origin` 验证 |
+| **关联地址错误** | `git remote set-url origin <正确地址>` |
+
+### 1.3 当前分支名
+
+**判断方法**
+
+```bash
+git branch --show-current
+git branch -a
+```
+
+| 状态 | 处理方式 |
+|---|---|
+| **当前在 `lcx`**（当前状态） | 见下方说明 |
+| **当前在 `main`** | 新建功能分支后再开发，见第 3 节 |
+| **处于 detached HEAD** | `git switch -c feat/B-cache-compress-and-separators` 立即建分支保存工作 |
+
+**关于 `lcx` 分支的处理（重要）**
+
+当前本地有 `lcx` 与 `main` 两个分支，远程也有 `origin/lcx` 与 `origin/main`，且 `origin/HEAD → origin/main`。需先与组长确认：
+
+- 若 `lcx` **就是你的个人分支**：可直接在 `lcx` 上开发，但仍建议按第 3 节新建功能分支，保持提交语义清晰。
+- 若 `lcx` **属于其他成员**：**绝对不要在上面提交**，立即切到 `main` 并新建自己的分支。
+
+```bash
+# 与组长确认后，切回 main 并同步到最新
+git switch main
+git pull --rebase origin main
+
+# 新建我的功能分支
+git switch -c feat/B-cache-compress-and-separators
+```
+
+---
+
+## 2. 阶段一：环境准备
+
+### 2.1 目的
+
+搭建可运行 `cache.py` / `mm_separators.py` 测试的 Python 环境，确保**不依赖 GPU、不联网、不调用真实 API、不加载大模型权重**。
+
+### 2.2 操作步骤
+
+**步骤 2.2.1 配置 Git 身份（必须为本人的账号）**
+
+| 项目 | 操作 |
+|---|---|
+| 目的 | 保证提交记录归属本人（作业硬性要求，教师会查） |
+| VS Code | 无需图形操作，用终端执行 |
+| 命令 | 见下 |
+
+```bash
+git config user.name "<你的 GitHub 用户名>"
+git config user.email "<你的 GitHub 注册邮箱>"
+git config --global core.quotepath false
+git config --global core.autocrlf input
+```
+
+> `core.quotepath false`：让 `git status` 正常显示中文文件名（否则显示 `\345\256\236...` 转义）。
+> `core.autocrlf input`：避免 Windows CRLF 与 Linux LF 混用产生整文件 diff。
+
+**步骤 2.2.2 创建并激活虚拟环境**
+
+```bash
+cd "C:\Users\Administrator\OneDrive\Desktop\课程任务\软件质量测试\MMSep_test"
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+```
+
+**步骤 2.2.3 安装依赖**
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install transformers pytest
+pip freeze > requirements.txt
+```
+
+> 装 **CPU 版 torch** 即可，体积远小于 CUDA 版，且完全满足分工方案"不依赖 GPU"的要求。
+> 若 `transformers` 版本与 `cache.py` 中 `from transformers.cache_utils import Cache` 不兼容，用 `pip install "transformers>=4.36"` 调整。
+
+**步骤 2.2.4 验证环境**
+
+```bash
+python -c "import torch, transformers, pytest; print(torch.__version__, transformers.__version__, pytest.__version__)"
+python -c "from transformers.cache_utils import Cache; print('Cache OK')"
+```
+
+**预期结果**：三行版本号正常输出，`Cache OK` 打印成功，无 `ImportError`。
+
+### 2.3 阶段一完成标志 / 自查清单
+
+| # | 检查项 | 通过条件 |
+|---|---|---|
+| 1 | `git config user.name` 为本人 | 输出本人用户名，非 `lcx`（除非你就是 lcx） |
+| 2 | 虚拟环境已激活 | 命令行前缀出现 `(.venv)` |
+| 3 | torch 可 import 且为 CPU 版 | `python -c "import torch; print(torch.cuda.is_available())"` 输出 `False` 也可接受 |
+| 4 | `from transformers.cache_utils import Cache` 成功 | 无 ImportError |
+| 5 | `requirements.txt` 已生成且非空 | 文件含 torch / transformers / pytest |
+| 6 | `git status` 中文文件名正常显示 | 不再出现 `\345\256\236` 转义 |
+
+---
+
+## 3. 阶段二：分工确认与骨架建立
+
+### 3.1 目的
+
+确认分支、补齐空骨架文件、与成员 A 约定共用文件边界。
+
+### 3.2 操作步骤
+
+**步骤 3.2.1 建立我的工作分支**
+
+| 项目 | 内容 |
+|---|---|
+| 目的 | 隔离我的改动，避免与成员 A 互相覆盖 |
+| VS Code | 左下角分支名 →「创建新分支」→ 输入 `feat/B-cache-compress-and-separators` |
+| 命令 | 见下 |
+
+```bash
+git switch main
+git pull --rebase origin main
+git switch -c feat/B-cache-compress-and-separators
+git branch --show-current
+```
+
+**预期结果**：输出 `feat/B-cache-compress-and-separators`。
+
+**步骤 3.2.2 补齐 `.gitignore`**
+
+当前 `.gitignore` **为空文件**，会导致 `__pycache__`、`.venv`、模型权重被提交。用 VS Code 打开并写入：
+
+```gitignore
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# 模型权重与大数据（防误提交大文件）
+*.pth
+*.pt
+*.bin
+*.safetensors
+*.gguf
+*.npz
+data/
+outputs/
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# OneDrive 冲突副本
+*-PC-*.txt
+*.lnk
+```
+
+**步骤 3.2.3 补齐 `requirements.txt` 与 `README.md`**
+
+`requirements.txt` 已由 2.2.3 的 `pip freeze` 生成。
+`README.md` 当前**为空**，我负责补"测试运行方式"部分（与成员 A 协商，避免重复编辑冲突）：
+
+```markdown
+# MMSep_test
+
+## 环境配置
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+
+## 运行全部测试
+software_test.py 一键运行：
+python software_test.py
+或：
+pytest tests/ -v
+```
+
+**步骤 3.2.4 与成员 A 确认三件事**
+
+- [ ] `tests/conftest.py` 的 fixture 命名前缀已分工（我的用 `mmsep_` / `cache_compress_`）
+- [ ] `software_test.py` 由成员 A 提供，我会本地验证它能跑通我的用例
+- [ ] 用例编号区间已分配（建议我 `MMSEP-UT-016 ~ MMSEP-UT-030`，最终以组长为准）
+
+### 3.3 阶段二完成标志 / 自查清单
+
+| # | 检查项 | 通过条件 |
+|---|---|---|
+| 1 | 位于功能分支 | `git branch --show-current` 输出 `feat/B-cache-compress-and-separators` |
+| 2 | 分支基于最新 main | `git log --oneline -1` 与 `origin/main` 一致 |
+| 3 | `.gitignore` 非空且含 `__pycache__`、`.venv`、`*.pth` | 文件存在且有内容 |
+| 4 | `requirements.txt` 非空 | 包含 torch / transformers / pytest |
+| 5 | 已与成员 A 就 conftest 命名达成一致 | 口头/书面确认完成 |
+| 6 | 用例编号区间已分配 | 已记录 |
+
+---
+
+## 4. 阶段三：本地开发
+
+### 4.1 目的
+
+编写 `cache.py` 压缩功能与 `mm_separators.py` 的测试用例，累计 ≥ 15 条，并复现 ≥ 2 个有效缺陷。
+
+### 4.2 文件结构
+
+```
+tests/
+├── conftest.py                  # 共用 fixture（我与成员 A 分段编写）
+├── test_cache_compress.py       # 我负责：cache.py 压缩功能
+└── test_mm_separators.py        # 我负责：mm_separators.py
+```
+
+### 4.3 操作步骤
+
+**步骤 4.3.1 编写 tensor fixture（小尺寸、固定、CPU）**
+
+目的：让所有用例在 CPU 上秒级跑完，不依赖随机性。
+
+VS Code：`tests/` 上右键 →「新建文件」→ `conftest.py`
+
+要点：
+- 用固定随机种子：`torch.manual_seed(2026)`
+- 尺寸取极小值：`batch=2, seq_len=16, num_heads=2, head_dim=8`
+- 视觉 token 数取 `16` 而非 `576`（保证秒级）
+- 分隔符 id 用小整数列表，如 `[1, 2, 3]`
+
+**步骤 4.3.2 编写 `tests/test_cache_compress.py`（≥ 8 条）**
+
+建议用例清单（对应分工方案）：
+
+| 编号 | 用例 | 方法 |
+|---|---|---|
+| B-01 | `compress_past_win_2_seps()` 无分隔符 | 边界值 |
+| B-02 | 单个分隔符 | 边界值 |
+| B-03 | 多个分隔符 | 等价类 |
+| B-04 | `SEP_PADDING_IN_BATCH=True`，batch 分隔符数量不等 → padding | 等价类 |
+| B-05 | `SEP_PADDING_IN_BATCH=False` → 截断 | 等价类 |
+| B-06 | `compress_kv_cache_and_tokids_layer_wise()` 正常路径 | 场景法 |
+| B-07 | `compress_kv_cache_and_tokids_noimg_layer_wise()` | 场景法 |
+| B-08 | 初始 / separator / local 三段长度与顺序 | 场景法 |
+| B-09 | `SEP_ACCUMULATION=True/False` 差异 | 等价类 |
+| B-10 | `USE_MAX_SEP_CACHE=True/False` 差异 | 等价类 |
+| B-11 | cache 达到上限后的行为 | 边界值 |
+| B-12 | `update()` 普通 token / 分隔符 / 预填充 / 视觉召回四态 | 场景法 |
+
+**步骤 4.3.3 编写 `tests/test_mm_separators.py`（≥ 7 条）**
+
+| 编号 | 用例 | 方法 |
+|---|---|---|
+| B-13 | 保留指定数量的视觉 token | 等价类 |
+| B-14 | 保留 token 保持原始顺序 | 等价类 |
+| B-15 | `visual_sep_pos` 正确 | 场景法 |
+| B-16 | `position_ids` 同步更新 | 场景法 |
+| B-17 | `attention_mask` 同步更新 | 场景法 |
+| B-18 | 特征长度同步更新 | 场景法 |
+| B-19 | 无图像 token（`image_token_posi = -1`） | 边界值 |
+| B-20 | 不同视觉 token 数量 | 等价类 |
+| B-21 | batch > 1 | 场景法 |
+| B-22 | 非法 `image_token_posi` | 边界值 |
+| B-23 | 空 `attention_mask` / 边界序列长度 | 边界值 |
+
+> 💡 **重点提示**：B-19（无图像 token）极可能直接触发崩溃——`mm_separators.py` 第 64 行使用了第 99 行才定义的 `attention_mask_list`。**请先自行复现确认，不要预先下结论**。
+> B-21（batch > 1）建议重点验证 `self.visual_sep_pos` 是否被循环覆盖。
+
+**步骤 4.3.4 运行与调试**
+
+```bash
+.venv\Scripts\activate
+pytest tests/test_cache_compress.py tests/test_mm_separators.py -v
+```
+
+VS Code：左侧「测试」图标（烧瓶）→ 刷新 → 点击运行。
+
+**步骤 4.3.5 缺陷复现与修复验证**
+
+对每个缺陷：
+1. 记录**缺陷现象**（报错信息 / 错误输出）
+2. 记录**复现步骤**（精确到命令与用例编号）
+3. **复制一份被测文件到 `tests/` 之外的临时位置做修复验证**，不要直接改 `src/`（否则无法同时展示"缺陷存在"与"已修复"）
+4. 修复后运行回归，截图保存"修复前失败 / 修复后通过"两组结果
+
+### 4.4 阶段三完成标志 / 自查清单
+
+| # | 检查项 | 通过条件 |
+|---|---|---|
+| 1 | `tests/test_cache_compress.py` 存在且可运行 | `pytest` 能收集到用例 |
+| 2 | `tests/test_mm_separators.py` 存在且可运行 | 同上 |
+| 3 | 用例数 ≥ 15 | `pytest --collect-only -q` 统计 |
+| 4 | 覆盖 ≥ 2 种方法 | 等价类 / 边界值 / 场景法在 Excel 备注列已标注 |
+| 5 | 缺陷 ≥ 2 个且已复现 | 有报错截图与复现步骤 |
+| 6 | 修复验证完成 | 有"修复后通过"的截图 |
+| 7 | 全部测试 CPU 可跑、不联网 | 断网后 `pytest` 仍全通过 |
+| 8 | 单次全量运行耗时可接受 | 建议 < 60 秒 |
+
+---
+
+## 5. 阶段四：提交与推送
+
+### 5.1 提交信息格式（Conventional Commits）
+
+```
+<type>(<scope>): <subject>
+```
+
+| type | 用途 |
+|---|---|
+| `feat` | 新增测试功能/新用例 |
+| `test` | 测试相关改动 |
+| `fix` | 修复缺陷（含修复验证） |
+| `docs` | 文档（README、用例清单说明） |
+| `chore` | 工程配置（.gitignore、requirements） |
+| `refactor` | 重构测试代码 |
+
+**我的 scope 建议**：`cache-compress` / `mmsep`
+
+**示例**
+
+```
+chore: 补充 .gitignore 与 requirements.txt
+test(cache-compress): 新增 compress_past_win_2_seps 无分隔符/单分隔符/多分隔符用例
+test(cache-compress): 新增 SEP_PADDING_IN_BATCH 与 SEP_ACCUMULATION 参数组合用例
+test(mmsep): 新增视觉 token 保留数量与顺序验证用例
+fix(mmsep): 修复 graph_rank_separators 无图像 token 时 NameError
+docs: 补充 README 测试运行说明与成员 B 用例清单
+```
+
+> ⚠️ 现有历史中 `tset`、`v1.0 最初版本`、`v1.1` 这类提交信息**不符合规范**，教师会查阅提交历史。从我的分支开始严格按规范执行，并可在报告中说明。
+
+### 5.2 提交频率要求
+
+- 每完成 **3–5 条用例**提交一次
+- **禁止**攒到最后一次性提交（教师明确会查）
+- 建议每天至少 1–2 次提交
+
+### 5.3 推送前先拉取（完整流程）
+
+**VS Code 图形路径**
+
+1. 左侧「源代码管理」（Ctrl+Shift+G）
+2. 更改区文件右侧 `+` 暂存（Stage Changes）
+3. 上方输入框写提交信息 → 点击 ✓ 提交
+4. 左下角「同步更改」按钮 = pull + push（推荐）
+5. 或：左下角分支名旁的刷新图标先拉取，再点同步
+
+**命令行等效流程**
+
+```bash
+# 1. 查看改动
+git status
+git diff
+
+# 2. 暂存
+git add tests/test_cache_compress.py
+git add tests/test_mm_separators.py
+git add tests/conftest.py
+
+# 3. 提交
+git commit -m "test(cache-compress): 新增压缩功能 12 条用例"
+
+# 4. 推送前先拉取（关键）
+git fetch origin
+git pull --rebase origin main
+
+# 5. 推送
+git push -u origin feat/B-cache-compress-and-separators
+```
+
+**预期结果**：拉取无冲突，推送成功，GitHub 仓库页面可见该分支。
+
+### 5.4 冲突处理流程
+
+触发条件：成员 A 与我改了同一文件（尤其是 `conftest.py`、`README.md`）的同一区域。
+
+**处理步骤**
+
+1. `git pull --rebase origin main` 后提示 `CONFLICT`
+2. 查看冲突文件：
+   ```bash
+   git status
+   ```
+3. VS Code 打开冲突文件，会看到冲突标记：
+   ```
+   <<<<<<< HEAD
+   我的内容
+   =======
+   成员 A 的内容
+   >>>>>>> origin/main
+   ```
+4. 冲突块上方有四个按钮：**Accept Current / Accept Incoming / Accept Both / Compare Changes**
+   - 若改动互不相干 → 选 **Accept Both**
+   - 若需人工合并 → 手动编辑删除标记后保留正确内容
+5. 标记已解决：
+   ```bash
+   git add <冲突文件>
+   ```
+6. 继续 rebase：
+   ```bash
+   git rebase --continue
+   ```
+7. 若想放弃：
+   ```bash
+   git rebase --abort
+   ```
+8. 完成后推送：
+   ```bash
+   git push -u origin feat/B-cache-compress-and-separators
+   ```
+
+> ⚠️ **预防优于解决**：与成员 A 约定**不要同时编辑 `conftest.py` 的同一段**，按 3.2.4 的前缀分工即可基本避免冲突。
+
+### 5.5 阶段四完成标志 / 自查清单
+
+| # | 检查项 | 通过条件 |
+|---|---|---|
+| 1 | 提交信息全部符合 Conventional Commits | `git log --oneline -20` 逐条核对 |
+| 2 | 提交次数 ≥ 5 次且分散在多天 | `git log --format=%ad --date=short` 显示多天 |
+| 3 | 本人账号提交 | `git log --format='%an <%ae>'` 显示本人 |
+| 4 | 已推送到远程分支 | GitHub 页面可见 `feat/B-cache-compress-and-separators` |
+| 5 | 推送前已拉取 | 无 `non-fast-forward` 拒绝 |
+| 6 | 无冲突残留 | `git status` 显示 `nothing to commit, working tree clean` |
+
+---
+
+## 6. 阶段五：验收自查
+
+### 6.1 目的
+
+在提交作业前逐项核对，确保满足 `实践作业要求v2026.pdf` 与分工方案的全部硬性指标。
+
+### 6.2 操作步骤
+
+```bash
+# 全量运行（断网状态验证）
+pytest tests/ -v
+
+# 或用组长/成员A提供的一键入口
+python software_test.py
+
+# 统计用例数
+pytest tests/test_cache_compress.py tests/test_mm_separators.py --collect-only -q | tail -3
+```
+
+### 6.3 阶段五完成标志 / 自查清单
+
+| # | 检查项 | 通过条件 |
+|---|---|---|
+| 1 | 我的用例数 ≥ 15 条 | collect-only 统计达标 |
+| 2 | 全组合计 ≥ 30 条 | 与成员 A 汇总后达标 |
+| 3 | 覆盖 ≥ 2 种设计方法 | 等价类 / 边界值 / 场景法至少两种 |
+| 4 | 我负责的有效缺陷 ≥ 2 个 | 含现象、复现步骤、修复验证 |
+| 5 | 全组合计缺陷 ≥ 3 个 | 与成员 A 汇总后达标 |
+| 6 | 一条命令可运行全部测试 | `python software_test.py` 或 `pytest tests/` 成功 |
+| 7 | 不依赖联网 / API key / GPU / 大模型权重 | 断网 + 无 CUDA 环境仍全通过 |
+| 8 | 用例已写入附录 1 Excel | 编号、测试项、备注（方法）完整 |
+| 9 | 缺陷已写入附录 2 缺陷报告 | 格式符合模板 |
+| 10 | 执行结果截图已保存 | 含通过数、失败数、环境信息 |
+| 11 | 已推送到 GitHub | 远程仓库可见最终版本 |
+| 12 | 已与成员 A 交叉运行对方测试 | 缺陷可复现、修复后回归通过 |
+
+---
+
+## 7. 协作规范汇总
+
+| 项目 | 规范 |
+|---|---|
+| **分支命名** | `feat/B-cache-compress-and-separators` |
+| **提交格式** | `<type>(<scope>): <subject>`，type ∈ feat/test/fix/docs/chore/refactor |
+| **scope 约定** | 我用 `cache-compress` / `mmsep`；成员 A 用 `eval` / `basic` |
+| **推送前** | 必须 `git fetch origin` + `git pull --rebase origin main` |
+| **禁止** | 直接向 `main` 推送；使用 `git push -f`（除非组长明确要求） |
+| **冲突** | VS Code 冲突编辑器 → Accept Both 或手动合并 → `git add` → `git rebase --continue` |
+| **共用文件** | `conftest.py` 按 fixture 前缀分工；`README.md` 按段落分工 |
+| **账号** | 必须用本人 GitHub 账号提交，不得代提交 |
+
+---
+
+## 8. 风险与应对
+
+### 8.1 OneDrive 同步导致 `.git` 损坏或文件占用
+
+**风险等级：高**（本项目位于 `OneDrive\Desktop` 下）
+
+**症状**
+
+- `fatal: not a git repository (or any of the parent directories): .git`
+- `fatal: Unable to create '.git/index.lock': File exists`
+- `error: object file ... is corrupt`
+- VS Code 报"文件正在被另一个程序使用"
+
+**预防**
+
+1. **强烈建议**：把仓库移出 OneDrive，例如 `C:\dev\MMSep_test`
+   ```bash
+   # 在 OneDrive 外重新 clone，再继续工作
+   git clone https://github.com/Jqtfymzty/MMSep_test.git C:\dev\MMSep_test
+   ```
+2. 若必须留在 OneDrive：
+   - 工作前右键 OneDrive 托盘图标 →「暂停同步」→ 选 2 小时/8 小时
+   - 对仓库文件夹右键 →「始终保留在此设备上」
+   - **提交/推送完成后再恢复同步**
+3. 不要在 OneDrive 同步进行中执行 `git gc`、`git rebase` 等大量写 `.git` 的操作
+
+**恢复**
+
+```bash
+# 情况 A：index.lock 残留
+rm -f .git/index.lock
+
+# 情况 B：对象损坏，先体检
+git fsck --full
+
+# 情况 C：无法修复 —— 从远程重新克隆（前提是已推送过）
+cd ..
+git clone https://github.com/Jqtfymzty/MMSep_test.git MMSep_test_recover
+# 把未推送的改动手工复制过去
+```
+
+> **根本对策**：**勤推送**。只要代码在 GitHub 上，本地损坏最多损失当天工作。
+
+### 8.2 中文路径与编码问题
+
+**症状**
+
+- `git status` 显示 `"docs/\345\256\236\350\267\265..."` 转义
+- Python 报 `UnicodeDecodeError`
+- `.bat` 运行输出乱码
+
+**处理**
+
+```bash
+# 1. Git 正常显示中文
+git config --global core.quotepath false
+
+# 2. 换行符统一
+git config --global core.autocrlf input
+
+# 3. 临时解决 Windows 控制台编码
+chcp 65001
+set PYTHONIOENCODING=utf-8
+```
+
+VS Code：右下角编码按钮（如显示 `UTF-8` / `GBK`）→「通过编码保存」→ 选 **UTF-8**。
+
+`.py` 文件统一 UTF-8；`.bat` 若含中文，在文件首行加 `chcp 65001 >nul`。
+
+### 8.3 误提交大文件
+
+**风险**：GitHub 单文件上限 100 MB，`.pth` / `.safetensors` 极易超限。
+
+**预防**
+
+1. 确保 `.gitignore` 已含 `*.pth *.pt *.bin *.safetensors data/ outputs/`（见 3.2.2）
+2. 提交前检查将要加入的文件大小：
+   ```bash
+   git status --short
+   git ls-files -o --exclude-standard | xargs -I{} ls -la "{}"
+   ```
+3. 不要下载任何模型权重到仓库目录
+
+**已误提交的补救**
+
+```bash
+# 仅从暂存区移除（文件保留在本地）
+git rm --cached <大文件路径>
+
+# 若已 commit 但未 push：回退
+git reset --soft HEAD~1
+
+# 若已 push 到远程：需要清理历史（谨慎，先与组长沟通）
+# 推荐 BFG 或 git filter-repo
+git filter-repo --path <大文件路径> --invert-paths --force
+git push origin <分支> --force
+```
+
+### 8.4 推送被拒
+
+**症状**
+
+```
+! [rejected] ... (non-fast-forward)
+error: failed to push some refs
+```
+
+**原因**：远程分支有你本地没有的新提交。
+
+**处理**
+
+```bash
+git fetch origin
+git pull --rebase origin <你的分支名>
+# 若有冲突按 5.4 处理
+git push origin <你的分支名>
+```
+
+> ❌ **不要**直接用 `git push -f`，会覆盖他人提交。仅在组长明确要求且已确认无人基于该分支工作时使用。
+
+**另一种情况：权限被拒**
+
+```
+remote: Permission to ... denied to <用户名>
+fatal: unable to access ... : The requested URL returned error: 403
+```
+
+处理：确认已被组长添加为仓库 Collaborator；若用 HTTPS，检查凭据管理器中的账号是否为本人：
+控制面板 → 凭据管理器 → Windows 凭据 → 找到 `git:https://github.com` → 编辑为本人账号/令牌。
+
+### 8.5 冲突处理
+
+见 **5.4 冲突处理流程**。
+
+补充三条原则：
+
+1. **沟通优先**：与成员 A 约定好各自改动的文件与段落，能避免 90% 冲突
+2. **小步提交**：改动越小，冲突越易解决
+3. **不确定就问**：涉及 `conftest.py` 等共用文件的冲突，**不要自行决定**，先与成员 A 确认
+
+---
+
+## 9. 命令速查
+
+```bash
+# —— 环境 ——
+python -m venv .venv
+.venv\Scripts\activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install transformers pytest
+pip freeze > requirements.txt
+
+# —— 状态检查 ——
+git rev-parse --is-inside-work-tree      # 是否 git 仓库
+git remote -v                            # 远程关联
+git branch --show-current                # 当前分支
+git branch -a                            # 所有分支
+git status                               # 工作区状态
+git log --oneline -10                    # 提交历史
+
+# —— 分支 ——
+git switch main
+git pull --rebase origin main
+git switch -c feat/B-cache-compress-and-separators
+
+# —— 提交 ——
+git add <文件>
+git commit -m "test(cache-compress): 新增压缩功能用例"
+
+# —— 推送 ——
+git fetch origin
+git pull --rebase origin main
+git push -u origin feat/B-cache-compress-and-separators
+
+# —— 测试 ——
+pytest tests/test_cache_compress.py -v
+pytest tests/test_mm_separators.py -v
+pytest tests/ -v
+pytest tests/ --collect-only -q
+
+# —— 应急 ——
+rm -f .git/index.lock
+git fsck --full
+git rebase --abort
+git reset --soft HEAD~1
+git rm --cached <文件>
+```
+
+---
+
+## 10. 时间节点
+
+| 日期 | 我的任务 |
+|---|---|
+| 9/9 | 阶段一（环境）+ 阶段二（分支、.gitignore、与 A 确认分工） |
+| 9/10–9/11 | 阶段三：编写 ≥ 15 条用例 |
+| 9/12 | 阶段三：缺陷复现 + 修复验证 |
+| 9/13 | 写入附录 1 Excel、附录 2 缺陷报告 |
+| 9/14 | 阶段五：全量验收、与 A 交叉测试、推送最终版 |
+| **9/15 23:00** | 提交截止 |
+
+> 作业硬性要求：**每人使用自己的 Git 账号提交，提交记录应能对应本人负责的代码和文档**。

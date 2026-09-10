@@ -1,0 +1,36 @@
+# Python bytecode and test cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local virtual environments
+.venv/
+venv/
+
+# IDE and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local secrets and environment variables
+.env
+.env.*
+!.env.example
+
+# Generated results and large model/data files
+outputs/
+results/
+*.log
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.gguf
+
+# Temporary files
+tmp/
+*.tmp
+~$*

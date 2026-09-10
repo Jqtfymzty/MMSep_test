@@ -1,0 +1,648 @@
+# 成员 B 负责部分源码解释
+
+> 文档性质：源码阅读与理解草稿。
+>
+> 使用说明：本文只解释现有实现，不提供测试用例或自动化测试代码。正式提交前，应由成员 B 结合自己的运行结果重新核对、补充并改写；“疑点”必须经过实际复现后才能写入缺陷报告。
+
+## 1. 阅读范围
+
+按照组内分工，成员 B 主要负责下面两部分：
+
+1. `src/cache.py` 中 `MMSepCache` 的缓存压缩逻辑，重点包括：
+   - `update()`
+   - `update_kv_cache_and_past_tok_ids()`
+   - `compress_kv_cache_and_tokids_noimg_layer_wise()`
+   - `compress_kv_cache_and_tokids_layer_wise()`
+   - `compress_past_win_2_seps()`
+   - 与切片、拼接和 batch 对齐有关的辅助方法
+2. `src/mm_separators.py` 中的 `graph_rank_separators()`。
+
+本文依据当前 `lcx` 分支中的源码编写。后续如果源码发生修改，需要同步更新本文中的行号和结论。
+
+## 2. 背景概念
+
+### 2.1 KV cache 是什么
+
+Transformer 自回归生成时，每一步都需要使用此前 token 的 Key 和 Value。若每次都重新计算历史 token，会产生大量重复计算，因此通常把历史 Key/Value 保存为 KV cache。
+
+源码默认的 Key、Value 形状是：
+
+```text
+[batch_size, num_heads, sequence_length, head_dim]
+```
+
+默认情况下，序列长度位于第 2 维，即：
+
+```python
+k_seq_dim = 2
+v_seq_dim = 2
+```
+
+代码也允许把序列长度配置在第 1 或第 3 维，并通过 `DIM_TO_SLICE` 和 `BAT_DIM_TO_SELECT` 选择对应的切片函数。
+
+### 2.2 为什么要压缩 KV cache
+
+随着生成序列增长，KV cache 会持续增长，显存占用和注意力计算量也会增加。该实现把 cache 划分为三个逻辑区域：
+
+```text
+┌────────────────┬────────────────────┬────────────────┐
+│ initial cache  │ separator cache    │ local cache    │
+│ 最开始的 token │ 历史窗口中的分隔符 │ 最近生成的 token │
+└────────────────┴────────────────────┴────────────────┘
+```
+
+- `initial cache`：固定保留序列开头的一段内容。
+- `separator cache`：从较早的历史窗口中只保留分隔符 token 对应的 KV。
+- `local cache`：完整保留最新的一段 token，避免丢失最近上下文。
+
+压缩的核心思想是：旧历史不全部保留，只保存被认为具有结构意义的分隔符；最近窗口则完整保存。
+
+### 2.3 文本分隔符与视觉分隔符
+
+两个源码文件处理的是两种不同的“分隔符”：
+
+- `cache.py` 使用 `separator_token_ids` 识别文本 token 中的标点、换行等分隔符。
+- `mm_separators.py` 根据注意力分数，从图像 token 中选出少量视觉 token，作为视觉分隔符。
+
+二者最后在 `MMSepCache.update()` 中衔接：缓存达到一定条件时先进行文本 KV 压缩；在指定层以后，还可以只把选中的视觉 token KV 返回给后续注意力计算。
+
+## 3. `MMSepCache` 的关键配置和运行状态
+
+### 3.1 与缓存区域有关的配置
+
+| 字段 | 含义 |
+|---|---|
+| `init_cache_size` | 每层固定保留的初始 KV 数量 |
+| `sep_cache_size` | 每层预设的分隔符缓存容量 |
+| `local_size` | 每层完整保留的最近窗口长度 |
+| `cache_size` | 每层触发压缩时参考的总缓存容量 |
+| `sep_exrange` | separator cache 的动态右边界，右端不包含 |
+| `max_sep_exidx` | separator cache 的最大右边界，初始值为 `init_cache_size + sep_cache_size` |
+
+这些字段在初始化时通过 `_set_layer_wise_attribute()` 转成按层保存的列表。传入单个整数时，每一层使用相同值；传入列表或元组时，长度必须等于 `layer_num`。
+
+### 3.2 控制压缩策略的开关
+
+| 字段 | 为 `True` 时 | 为 `False` 时 |
+|---|---|---|
+| `SEP_ACCUMULATION` | 新一轮分隔符与此前保存的分隔符合并 | 只保留本轮历史窗口中新找到的分隔符 |
+| `USE_MAX_SEP_CACHE` | separator cache 有固定上限，超出时保留靠后的部分 | separator cache 超出原容量后会扩容，同时增大 `cache_size` |
+| `SEP_PADDING_IN_BATCH` | batch 内分隔符数量对齐到最大值 | batch 内统一截断到最小值 |
+
+### 3.3 多模态相关字段
+
+| 字段 | 含义 |
+|---|---|
+| `image_token_length` | 各层的图像 token 数量 |
+| `image_start_pos` | 图像 token 在整个序列中的起始位置 |
+| `mmsep_layer` | 从哪一层开始启用视觉 token 筛选后的 KV 返回逻辑 |
+| `visual_sep_pos` | 被选中的视觉 token 在原序列中的位置 |
+
+### 3.4 运行时状态
+
+| 字段 | 含义 |
+|---|---|
+| `key_cache` / `value_cache` | 每一层实际保存的 KV tensor |
+| `past_tok_ids` | 与缓存压缩相关的历史 token id |
+| `_seen_tokens` | 第 0 层累计见过的 token 数量 |
+| `sep_exrange` | 每层当前 separator 区域的动态结束位置 |
+
+需要注意：`get_seq_length()` 返回的是 `_seen_tokens`，代表累计看过多少 token；`get_usable_length()` 返回当前某一层真实保留的 cache 长度。压缩发生后，这两个数通常不再相等。
+
+## 4. 序列切片和 batch 对齐辅助方法
+
+### 4.1 `slice_on_1d/2d/3d()`
+
+这三个方法只做一件事：根据序列长度所在的维度执行 `start:end` 切片。
+
+默认 KV 形状中序列长度在第 2 维，所以通常使用 `slice_on_2d()`：
+
+```text
+输入：[B, H, S, D]
+切片：[B, H, start:end, D]
+```
+
+### 4.2 `sep_1bat_select_on_1d/2d/3d()`
+
+这三个方法负责从 batch 中的某一条记录提取分隔符位置上的数据。三者算法相同，仅序列维度不同。
+
+以默认的 `sep_1bat_select_on_2d()` 为例：
+
+1. 根据 `Bid` 选择 batch 中的一条记录。
+2. 根据布尔索引 `sep_index` 选择分隔符位置。
+3. 如果启用 batch padding，则补到 `max_sep_num`。
+4. 如果不启用 padding 且给出了 `min_sep_num`，则截断到 `min_sep_num`。
+
+这里的“padding”不是补零，也不是补 `PADDING_ID`。源码取历史窗口末尾的 KV 或 token id 作为补齐内容。因此它的直接目的主要是让 batch 中各条记录能够 `torch.stack()`，补入的内容不一定是分隔符。
+
+### 4.3 `_slice_kv()` 与 `_slice_tok_ids()`
+
+- `_slice_kv()` 使用配置好的 Key/Value 序列维度，对两个 tensor 做相同区间的切片。
+- `_slice_tok_ids()` 始终在 token id 的最后一维切片。
+
+两个函数虽然保留了 `_CHECK_IDX` 参数，但当前实现中真正调用范围检查的代码已被注释。也就是说，实际边界行为主要遵循 PyTorch 切片规则，而不是 `_CHECK_IDX()` 中的断言规则。
+
+### 4.4 拼接方法
+
+- `_cat_kv()`：沿 Key 和 Value 各自的序列维度拼接两个 KV pair。
+- `cat_kv_cache()`：依次拼接多个 KV pair。
+- `cat_token_ids()`：沿最后一维拼接 token id。
+- `cat_kv_cache_and_tokids()`：同时完成 KV 和 token id 的拼接。
+
+压缩完成后的逻辑顺序由传入列表决定，当前实现通常按下面的顺序重建缓存：
+
+```text
+initial KV → separator KV → local KV
+```
+
+## 5. `update()`：缓存更新总入口
+
+位置：`src/cache.py` 第 262 行附近。
+
+`update()` 是一次模型计算后写入和返回缓存的总入口。其主要流程如下。
+
+### 5.1 更新累计 token 数量
+
+只有 `layer_idx == 0` 时才修改 `_seen_tokens`，避免同一个 token 在模型的每一层都被重复统计。
+
+- 如果传入 `input_ids`，增加 `input_ids.shape[-1]`。
+- 如果没有 `input_ids`，使用 `key_states.shape[-2]` 作为新增长度。
+
+第二种写法固定假定 Key 的序列维度是 `-2`，与类中可配置的 `k_seq_dim` 并不完全一致，这是阅读时需要留意的一点。
+
+### 5.2 决定直接追加还是压缩
+
+源码使用下面的逻辑判断：
+
+```text
+新增 KV 长度 + 当前可用 cache 长度 < cache_size
+或者当前处于 PREFILLING 阶段
+```
+
+满足条件时只追加，不压缩；否则先追加，再立即压缩。
+
+这里有两个重要含义：
+
+1. 判断使用严格小于号 `<`，当两者之和恰好等于 `cache_size` 时会进入压缩分支。
+2. `PREFILLING_FLAG=True` 会无条件走不压缩分支，即使预填充序列已经大于配置的 `cache_size`。
+
+### 5.3 判断最新 token 是否为文本分隔符
+
+非预填充阶段，代码读取当前层 `past_tok_ids` 的最后一个 token，并判断它是否属于 `separator_token_ids`。
+
+```text
+IS_LAST_TOKEN_SEP = 最后一个 token id 是否在 separator_token_ids 中
+```
+
+这个状态会影响后面的视觉 KV 返回逻辑。
+
+### 5.4 可选的位置编码移动
+
+当 `APPLY_PE_SHIFT=True` 时，`update()` 调用 `apply_shifted_pos_emb()`，重新计算缓存 Key 和当前 Query 的位置编码。成员 B 的主要分工不是位置编码算法，但需要知道它会改变最终写入的 Key，并可能让 `update()` 额外返回 `query_states`。
+
+### 5.5 普通返回和视觉筛选返回
+
+满足下列任一条件时，返回当前层完整 cache：
+
+- 最新 token 是文本分隔符；
+- 当前是预填充阶段；
+- 没有提供 `visual_sep_pos`；
+- 当前层位于 `mmsep_layer` 之前。
+
+否则，临时构造只保留部分视觉 KV 的返回结果：
+
+```text
+图像前 KV
+    + visual_sep_pos 指定的视觉 KV
+    + 原图像区域之后的 KV
+```
+
+这一视觉筛选只改变本次返回值，并没有用筛选结果覆盖 `self.key_cache[layer_idx]` 和 `self.value_cache[layer_idx]`。对象内部仍保存完整 cache，除非前面发生了文本缓存压缩。
+
+当前实现固定使用 `image_start_pos[0]`，因此视觉筛选部分显式使用的是第一个起始位置；其行为更接近单 batch 推理假设。
+
+如果传入了 `query_states`，返回三元组 `(key, value, query)`；否则返回二元组 `(key, value)`。
+
+## 6. `update_kv_cache_and_past_tok_ids()`：追加与压缩的连接层
+
+位置：`src/cache.py` 第 351 行附近。
+
+这个方法把“追加新状态”和“必要时压缩”连接起来：
+
+1. 如果 `input_ids` 不为空，先追加到对应层的 `past_tok_ids`。
+2. 如果这一层还没有 cache，直接把本次 Key/Value 加入列表。
+3. 如果已有 cache，沿序列维度追加新 Key/Value。
+4. `COMPRESS_KV=True` 时调用无图像 token id 版本的压缩函数。
+5. 用压缩结果覆盖当前层 cache 和 `past_tok_ids`。
+
+当前 `update()` 实际接入的是：
+
+```text
+compress_kv_cache_and_tokids_noimg_layer_wise()
+```
+
+而不是 `compress_kv_cache_and_tokids_layer_wise()`。后一方法仍保留在类中，但不在当前更新主路径上。
+
+## 7. `compress_past_win_2_seps()`：从历史窗口提取分隔符
+
+位置：`src/cache.py` 第 526 行附近。
+
+该方法只处理“待压缩历史窗口”，不负责拆分 initial/local 区域。
+
+### 7.1 建立分隔符位置掩码
+
+首先创建与 `past_win_tokids` 相同形状的布尔 tensor。然后遍历 `separator_token_ids`，把等于任一分隔符 id 的位置合并进布尔掩码。
+
+```text
+sep_index_tensor[b, s] = 当前 token 是否为任一分隔符
+```
+
+### 7.2 统计 batch 中的分隔符数量
+
+对每条记录统计分隔符数量，得到：
+
+- `min_sep_num`：batch 中最少的分隔符数量；
+- `max_sep_num`：batch 中最多的分隔符数量。
+
+由于 `torch.min()` 和 `torch.max()` 直接作用于 tensor，这两个值当前是零维 tensor，不是普通 Python `int`。
+
+### 7.3 batch 对齐
+
+不同 batch 记录可能找到不同数量的分隔符，而 `torch.stack()` 要求形状一致，因此需要对齐。
+
+#### `SEP_PADDING_IN_BATCH=True`
+
+所有记录补到 `max_sep_num`：
+
+- 已找到的分隔符保留；
+- 缺少的部分从该记录历史窗口的末尾取值补齐；
+- token id、Key 和 Value 使用相同数量的尾部位置。
+
+#### `SEP_PADDING_IN_BATCH=False`
+
+所有记录截断到 `min_sep_num`。如果 batch 中任何一条记录没有分隔符，则 `min_sep_num` 为 0，其他记录已找到的分隔符也会全部截断掉。
+
+`MIN_SEP_ALERT=True` 且未启用 padding 时，源码要求 `min_sep_num > 0`，否则触发断言。不过当前上层两个压缩方法调用它时没有传入 `MIN_SEP_ALERT=True`。
+
+### 7.4 构造返回值
+
+方法分别对 token id、Key 和 Value 执行相同的选择和对齐，最终返回：
+
+```text
+(
+    (separator_key, separator_value),
+    separator_token_ids,
+    min_sep_num,
+    max_sep_num
+)
+```
+
+逻辑上应保证三者的序列长度一致。
+
+## 8. `compress_kv_cache_and_tokids_noimg_layer_wise()`
+
+位置：`src/cache.py` 第 386 行附近。
+
+这是当前 `update()` 实际调用的压缩函数。名称中的 `noimg` 表示 `past_tok_ids` 不包含 initial 区域对应的图像 token id，但 KV cache 仍包含 initial KV。
+
+### 8.1 索引坐标的区别
+
+假设：
+
+```text
+offset_init_size_layer = init_cache_size[layer_idx]
+```
+
+则 KV cache 的坐标和 `past_tok_ids` 的坐标并不完全一致：
+
+```text
+KV cache:      [initial KV][separator/history KV][local KV]
+past_tok_ids:              [separator/history id][local id]
+```
+
+因此源码在切 token id 时，需要用 KV 下标减去 `offset_init_size_layer`。
+
+例如：
+
+```text
+KV 的 separator 右边界：sep_exrange
+token id 的对应右边界：sep_exrange - offset_init_size_layer
+```
+
+### 8.2 第一次压缩标志
+
+如果 `sep_exrange` 尚未初始化，先把它设为 initial 区域的结束位置。随后判断：
+
+```text
+Before_First_Time_Compress_Flag =
+    sep_exrange == offset_init_size_layer
+```
+
+第一次压缩前还没有旧 separator 区域，所以即使启用了 `SEP_ACCUMULATION`，也没有旧 separator 可以合并。
+
+### 8.3 拆分 cache
+
+一次压缩前，把当前 cache 拆成：
+
+1. `initial_kv`：`[0, offset_init_size_layer)`；
+2. `past_sep_kv`：此前已经积累的 separator 区域，仅在需要累积且不是第一次压缩时读取；
+3. `past_win_kv`：本轮需要压缩的较旧窗口；
+4. `local_kv`：末尾 `local_size` 个 KV，完整保留。
+
+对应的 token id 只拆出历史/分隔符部分和 local 部分，不包含 initial token id。
+
+### 8.4 提取并决定是否累积 separator
+
+`past_win_kv` 和 `past_win_tokids` 被传入 `compress_past_win_2_seps()`，得到本轮新的 separator。
+
+- 启用累积且不是第一次压缩：`旧 separator + 新 separator`。
+- 未启用累积或第一次压缩：只使用新 separator。
+
+### 8.5 固定上限或动态扩容
+
+#### `USE_MAX_SEP_CACHE=True`
+
+如果 separator 区域超出 `max_sep_exidx`，只保留 separator 序列的末尾部分。也就是说，容量不足时倾向保留较新的 separator。
+
+然后把 `sep_exrange` 固定到 `max_sep_exidx`。
+
+#### `USE_MAX_SEP_CACHE=False`
+
+保留全部 separator。如果数量超过原 `sep_cache_size`：
+
+- 增大 `max_sep_exidx`；
+- 同步增大 `sep_cache_size`；
+- 同步增大总 `cache_size`。
+
+因此这种模式不是严格的固定容量缓存。separator 持续累积时，cache 仍可能不断增长，源码中也用注释提示了这一点。
+
+### 8.6 重建压缩后的 cache
+
+`init_cache_size > 0` 时：
+
+```text
+KV：initial_kv + sep_kv + local_kv
+ID：sep_tokids + local_tokids
+```
+
+`init_cache_size == 0` 时：
+
+```text
+KV：sep_kv + local_kv
+ID：sep_tokids + local_tokids
+```
+
+返回值中的 `offset_init_size_layer` 告诉调用者 KV 与 token id 之间存在多少 initial 偏移。
+
+## 9. `compress_kv_cache_and_tokids_layer_wise()`
+
+位置：`src/cache.py` 第 461 行附近。
+
+这个版本与 `noimg` 版本的压缩结构基本相同，但它假定 `past_tok_ids` 与 KV cache 完整对齐，其中也包含 initial 区域的 token id。
+
+主要区别如下：
+
+| 对比项 | `layer_wise` | `noimg_layer_wise` |
+|---|---|---|
+| initial token id | 保存并参与切片 | 不保存 initial token id |
+| KV/id 索引 | 基本使用相同区间 | token id 区间需减 initial 偏移 |
+| 参数检查 | 调用 `_CHECK_PARAMS_VALIDITY()` | 参数检查被注释以减少开销 |
+| 长度前置检查 | 断言传入 KV 长度等于当前 usable length | 分别取得 KV 长度和 id 长度 |
+| 主更新路径 | 当前未由 `update()` 调用 | 当前由 `update()` 调用 |
+
+它最终重建的数据为：
+
+```text
+KV：initial + separator + local
+ID：initial + separator + local
+```
+
+因为 KV 与 id 坐标一致，代码更容易理解；但它不适合“图像 KV 存在而相应图像 token id 不保存在 `past_tok_ids` 中”的当前多模态使用方式。
+
+## 10. 缓存压缩的数据流总结
+
+```text
+新 Key/Value 和 input_ids
+          │
+          ▼
+       update()
+          │
+          ├─ 容量未到或正在预填充 ──► 直接追加
+          │
+          └─ 达到压缩条件
+                   │
+                   ▼
+     update_kv_cache_and_past_tok_ids()
+                   │
+                   ├─ 先追加新 KV 和 id
+                   ▼
+ compress_kv_cache_and_tokids_noimg_layer_wise()
+                   │
+                   ├─ 保留 initial
+                   ├─ 将旧窗口压成 separator
+                   ├─ 保留 local
+                   └─ 重建 cache
+                   │
+                   ▼
+      文本完整 cache 或视觉筛选后的临时返回值
+```
+
+## 11. `graph_rank_separators()`：视觉 token 筛选
+
+位置：`src/mm_separators.py`。
+
+这个函数不是一个独立模型类的方法实现，而是一个以 `self` 为第一个参数的普通函数。`src/README.md` 说明其预期使用方式是把函数复制或整合进目标多模态语言模型类。因此它依赖调用方模型已经具有若干属性和函数。
+
+### 11.1 对调用方对象的依赖
+
+函数直接使用以下成员：
+
+- `self.config.tokenizer_padding_side`
+- `self.image_tokens`
+- `self.image_token_posi`
+- `self.layers[layer].self_attn`
+- `self.layers[layer].input_layernorm`
+- `self.attention_type`
+- `self.training`
+- `self.visual_sep_pos`
+
+它还调用 `apply_rotary_pos_emb()`，但该函数没有在当前文件中导入或定义。结合 README，其设计可能假定目标模型文件的作用域中已经存在相应实现。
+
+### 11.2 输入和输出
+
+主要输入：
+
+| 参数 | 含义 |
+|---|---|
+| `layer` | 使用哪一层的归一化和注意力投影参数 |
+| `features` | 当前序列特征，形状通常为 `[B, S, hidden_size]` |
+| `position_ids` | 位置编号；为空时函数内部临时生成 |
+| `attention_mask` | 有效 token 掩码；为空时函数内部临时创建全 1 掩码 |
+| `alpha` / `theta` | 当前实现接收但没有实际使用 |
+
+返回值：
+
+```text
+(position_ids, new_attention_mask, final_features)
+```
+
+如果调用者原本传入的 `position_ids` 或 `attention_mask` 是 `None`，返回时相应结果也会恢复为 `None`，虽然函数内部仍使用临时值完成计算。
+
+### 11.3 输入预处理
+
+1. 保存原始 `position_ids` 和 `attention_mask`，用于最后决定返回 `None` 还是 tensor。
+2. `position_ids` 为空时生成 `0..S-1`。
+3. 只接受右侧 padding；不是 `right` 时抛出 `ValueError`。
+4. `attention_mask` 为空时生成全 `True` 掩码，否则转为布尔类型。
+
+### 11.4 计算视觉 token 保留数量
+
+每条记录先计算：
+
+```text
+keep_length = int(image_tokens / e)
+rank_length = int(keep_length × 0.5)
+```
+
+因此当前最终保留数量约为原视觉 token 数量的 `1 / (2e)`。由于进行了两次向下取整，小规模视觉 token 时可能得到 0。
+
+虽然函数参数中有 `alpha` 和 `theta`，当前保留比例并没有使用这两个参数，而是写死为上述公式。
+
+### 11.5 构造 Query 和 Key
+
+函数复制 `features`，再使用指定层的：
+
+1. `input_layernorm`；
+2. `q_proj` 生成 Query；
+3. `k_proj` 生成 Key；
+4. reshape 成多头形式；
+5. 应用旋转位置编码。
+
+变换后的典型形状是：
+
+```text
+query_states：[B, num_heads, S, head_dim]
+key_states：  [B, num_key_value_heads, S, head_dim]
+```
+
+函数只支持 `self.attention_type == 'flash_attention_2'`。其他注意力类型会抛出 `NotImplementedError`。
+
+### 11.6 计算视觉 token 的注意力排名
+
+对 batch 中每条包含图像的记录：
+
+1. 根据 `image_token_posi[i]` 和 `image_tokens[i]` 切出视觉 Key。
+2. 推理状态下取序列最后一个 Query。
+3. 计算该 Query 对所有视觉 Key 的缩放点积注意力。
+4. 对视觉位置做 softmax。
+5. 对所有注意力头取平均。
+6. 按平均注意力从高到低排序。
+7. 取前 `rank_length[i]` 个相对位置。
+8. 再按原位置从小到大排序，使保留 token 在新序列中保持原始先后顺序。
+9. 加上 `image_index`，得到它们在原始完整序列中的绝对位置。
+
+注意力排名决定“保留哪些视觉 token”，第二次升序排序决定“保留后按什么顺序排列”。这两个排序目的不同。
+
+### 11.7 重建特征序列
+
+新特征按三段拼接：
+
+```text
+图像区域之前的 features
+    + 被选中的视觉 features
+    + 原图像区域之后的 features
+```
+
+未被选中的视觉 token 从新特征中删除。函数把每条记录的新特征放入 `features_list`，随后按 batch 中的最大新长度在右侧补零，再 `torch.stack()` 成：
+
+```text
+final_features：[B, max_new_length, hidden_size]
+```
+
+### 11.8 更新 mask、位置编号和对象状态
+
+函数随后重建：
+
+- `attention_mask`；
+- `position_ids`；
+- `self.image_tokens[i]`；
+- `self.visual_sep_pos`。
+
+`position_ids` 对每条记录的有效区域重新编号为 `0..cur_len-1`，padding 区域保留为 0。
+
+`self.image_tokens[i]` 被更新为本轮筛选后的 `rank_length[i]`。这意味着函数会修改模型对象状态，下一次调用时看到的不再是原始图像 token 数量。
+
+`self.visual_sep_pos` 保存选中视觉 token 的绝对位置，供 `MMSepCache.update()` 在后续层中选取视觉 KV。
+
+## 12. 两个模块之间的衔接
+
+理想的数据衔接可以概括为：
+
+```text
+graph_rank_separators()
+    │
+    ├─ 从 features 中挑选视觉 token
+    ├─ 修改 image_tokens
+    └─ 产生 visual_sep_pos
+             │
+             ▼
+MMSepCache.update(..., visual_sep_pos=...)
+    │
+    ├─ 正常维护完整内部 cache
+    └─ 在指定层以后临时返回：
+       图像前 KV + 选中视觉 KV + 图像后 KV
+```
+
+需要特别核对 `visual_sep_pos` 的语义：`graph_rank_separators()` 计算的是原完整序列中的绝对位置；`MMSepCache.update()` 也直接用它索引完整 cache。只要二者基于同一序列坐标系，这一衔接才成立。
+
+## 13. 静态阅读发现的待验证疑点
+
+本节内容只是源码阅读后的风险提示，不代表已经确认的缺陷。只有通过实际运行获得稳定复现结果后，才能将其记入缺陷清单。
+
+### 13.1 `mm_separators.py` 中的疑点
+
+1. 无图像分支在 `attention_mask_list` 定义之前调用 `attention_mask_list.append()`，执行顺序上可能出现局部变量未定义。
+2. `self.training=True` 时分支内只有 `pass`，但后续仍使用 `text_query_states`，该变量可能没有赋值。
+3. `apply_rotary_pos_emb()` 在当前文件中没有定义或导入，单独导入并调用该模块时可能找不到名称；需要结合实际集成方式判断。
+4. batch 循环中每次都用单个 tensor 覆盖 `self.visual_sep_pos`，batch 大于 1 时最终只保留最后一条记录的位置。
+5. `features` 会按 `max_len` 补齐，但重建的 `attention_mask` 没有看到同样的补齐操作；当 batch 中各条新序列长度不同时，`torch.stack(attention_mask_list)` 可能形状不一致。
+6. 无图像记录即使绕过前面的变量问题，后续仍统一使用 `image_token_posi[i]` 和 `rank_length[i]` 重建 mask；`image_token_posi == -1` 时的切片语义需要核对。
+7. 代码注释说使用“最后一个有效文本 token”，实现却直接选择 `cur_query_states[:, -1, :]`，没有根据 `attention_mask` 找到最后一个有效位置。右侧 padding 场景中最后一个位置可能是 padding。
+8. `alpha`、`theta` 当前没有参与任何计算，函数接口与实现之间可能存在未完成的设计。
+9. `position_ids` 会重新从 0 编号；如果调用方传入的位置编号带有偏移或特殊规则，原语义可能丢失。
+10. mask 中保留视觉部分时使用的是原视觉区域前 `rank_length` 个 mask，而不是 `selected_index` 对应的 mask。普通全有效视觉区域下数值可能相同，但特殊 mask 场景需要确认。
+
+### 13.2 `cache.py` 中的疑点
+
+1. `update()` 统计无 `input_ids` 的新增长度时固定读取 `key_states.shape[-2]`，而类允许通过 `k_seq_dim` 改变序列维度。
+2. 容量判断使用 `< cache_size`，等于上限时立即压缩；需要确认这是否符合设计定义。
+3. 预填充阶段无条件不压缩，超长预填充是否允许 cache 超过配置上限需要确认。
+4. batch padding 使用窗口尾部数据补齐，而不是使用零或专用 `PADDING_ID`；这可能让补齐位置携带真实 KV。
+5. 未启用 batch padding 时，只要 batch 中一条记录没有分隔符，所有记录都会按 `min_sep_num=0` 截断为空。
+6. `USE_MAX_SEP_CACHE=False` 且持续累积分隔符时，代码会同步扩大 `cache_size`，因此总缓存不再具有固定上限。
+7. `update()` 的视觉筛选固定使用 `image_start_pos[0]`，多 batch 且图像起始位置不同的情况需要核对。
+8. `visual_sep_pos` 的类型注解是 `Optional[List[torch.Tensor]]`，但当前视觉函数写入的是一个 tensor；需要结合实际调用形态核对。
+9. `_slice_kv()` 和 `_slice_tok_ids()` 的显式索引检查被注释，错误区间可能被 PyTorch 静默截断而不是触发断言。
+10. `compress_kv_cache_and_tokids_layer_wise()` 保留在类中，但当前主更新路径只调用 `noimg` 版本；需要确认前者是否仍属于实际可达功能。
+
+## 14. 后续由成员 B 补充的内容
+
+阅读并亲自运行代码后，建议在本文追加下面几项：
+
+1. 实际使用的小尺寸 tensor 形状说明。
+2. 每个配置项经过运行确认后的真实行为。
+3. `past_tok_ids` 与 KV 序列长度之间的实测关系。
+4. `graph_rank_separators()` 所需最小模型上下文及依赖来源。
+5. 静态疑点的复现结论：确认、排除或属于预期设计。
+6. 修复前后的行为变化及对应 Git 提交编号。
+7. 与成员 A 负责部分串联时的数据入口和出口。
+
+## 15. 阅读结论
+
+成员 B 负责的两部分代码共同完成“减少长序列缓存开销”的目标：
+
+- `cache.py` 在时间维度上压缩旧文本历史，只保留初始内容、文本分隔符和最近窗口。
+- `mm_separators.py` 在多模态维度上根据注意力分数筛选视觉 token。
+- `MMSepCache.update()` 是二者衔接点：内部维护缓存状态，并根据阶段、层号、文本分隔符和视觉位置决定返回完整 KV 还是筛选后的视觉 KV。
+
+这部分实现包含较多状态更新、动态索引、batch 对齐和张量维度假设。理解时不能只检查返回值，还需要同时关注对象字段、KV 与 token id 的坐标差异，以及多次调用后的状态变化。
