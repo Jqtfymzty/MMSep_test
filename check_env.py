@@ -24,6 +24,7 @@ from importlib import metadata as md
 KEY_PACKAGES = [
     "torch",
     "transformers",
+    "tokenizers",
     "pytest",
     "numpy",
     "tqdm",
