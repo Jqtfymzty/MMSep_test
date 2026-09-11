@@ -61,7 +61,6 @@ def graph_rank_separators(
         if image_index == -1:
             cur_input_embeds = features[i]
             features_list.append(cur_input_embeds)
-            attention_mask_list.append(attention_mask[i])
             continue
         
         # --------- 1) compute attention scores: last valid text token -> visual tokens ----------
@@ -104,6 +103,18 @@ def graph_rank_separators(
 
         cur_new_embed = torch.cat([cur_new_embed, torch.zeros((dif, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device)], dim=0)    # pad to max_len
         embeds_padded.append(cur_new_embed)
+
+        if self.image_token_posi[i] == -1:
+            new_attention_mask = attention_mask[i]
+            attention_mask_list.append(new_attention_mask)
+            valid_len = new_attention_mask.sum().item()
+            position_ids[i, :valid_len] = torch.arange(
+                0,
+                valid_len,
+                dtype=position_ids.dtype,
+                device=position_ids.device,
+            )
+            continue
         
         new_attention_mask = torch.cat(
             [   attention_mask[i][:self.image_token_posi[i]], # before image tokens

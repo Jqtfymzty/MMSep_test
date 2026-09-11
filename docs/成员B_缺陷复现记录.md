@@ -77,7 +77,7 @@ attention_mask_list.append(attention_mask[i])
 
 ### 当前状态
 
-已复现，尚未修复。
+已修复。无图像分支不再提前访问尚未创建的 `attention_mask_list`，而是在统一重建阶段保留原 mask 并重新生成有效位置编号。对应测试已由失败转为通过。
 
 ## 3. B-DEF-02：训练模式下 Query 变量没有赋值
 
