@@ -70,42 +70,42 @@ v_seq_dim = 2
 
 ### 3.1 与缓存区域有关的配置
 
-| 字段 | 含义 |
-|---|---|
-| `init_cache_size` | 每层固定保留的初始 KV 数量 |
-| `sep_cache_size` | 每层预设的分隔符缓存容量 |
-| `local_size` | 每层完整保留的最近窗口长度 |
-| `cache_size` | 每层触发压缩时参考的总缓存容量 |
-| `sep_exrange` | separator cache 的动态右边界，右端不包含 |
-| `max_sep_exidx` | separator cache 的最大右边界，初始值为 `init_cache_size + sep_cache_size` |
+| 字段                | 含义                                                                       |
+| ------------------- | -------------------------------------------------------------------------- |
+| `init_cache_size` | 每层固定保留的初始 KV 数量                                                 |
+| `sep_cache_size`  | 每层预设的分隔符缓存容量                                                   |
+| `local_size`      | 每层完整保留的最近窗口长度                                                 |
+| `cache_size`      | 每层触发压缩时参考的总缓存容量                                             |
+| `sep_exrange`     | separator cache 的动态右边界，右端不包含                                   |
+| `max_sep_exidx`   | separator cache 的最大右边界，初始值为`init_cache_size + sep_cache_size` |
 
 这些字段在初始化时通过 `_set_layer_wise_attribute()` 转成按层保存的列表。传入单个整数时，每一层使用相同值；传入列表或元组时，长度必须等于 `layer_num`。
 
 ### 3.2 控制压缩策略的开关
 
-| 字段 | 为 `True` 时 | 为 `False` 时 |
-|---|---|---|
-| `SEP_ACCUMULATION` | 新一轮分隔符与此前保存的分隔符合并 | 只保留本轮历史窗口中新找到的分隔符 |
-| `USE_MAX_SEP_CACHE` | separator cache 有固定上限，超出时保留靠后的部分 | separator cache 超出原容量后会扩容，同时增大 `cache_size` |
-| `SEP_PADDING_IN_BATCH` | batch 内分隔符数量对齐到最大值 | batch 内统一截断到最小值 |
+| 字段                     | 为`True` 时                                    | 为`False` 时                                             |
+| ------------------------ | ------------------------------------------------ | ---------------------------------------------------------- |
+| `SEP_ACCUMULATION`     | 新一轮分隔符与此前保存的分隔符合并               | 只保留本轮历史窗口中新找到的分隔符                         |
+| `USE_MAX_SEP_CACHE`    | separator cache 有固定上限，超出时保留靠后的部分 | separator cache 超出原容量后会扩容，同时增大`cache_size` |
+| `SEP_PADDING_IN_BATCH` | batch 内分隔符数量对齐到最大值                   | batch 内统一截断到最小值                                   |
 
 ### 3.3 多模态相关字段
 
-| 字段 | 含义 |
-|---|---|
-| `image_token_length` | 各层的图像 token 数量 |
-| `image_start_pos` | 图像 token 在整个序列中的起始位置 |
-| `mmsep_layer` | 从哪一层开始启用视觉 token 筛选后的 KV 返回逻辑 |
-| `visual_sep_pos` | 被选中的视觉 token 在原序列中的位置 |
+| 字段                   | 含义                                            |
+| ---------------------- | ----------------------------------------------- |
+| `image_token_length` | 各层的图像 token 数量                           |
+| `image_start_pos`    | 图像 token 在整个序列中的起始位置               |
+| `mmsep_layer`        | 从哪一层开始启用视觉 token 筛选后的 KV 返回逻辑 |
+| `visual_sep_pos`     | 被选中的视觉 token 在原序列中的位置             |
 
 ### 3.4 运行时状态
 
-| 字段 | 含义 |
-|---|---|
-| `key_cache` / `value_cache` | 每一层实际保存的 KV tensor |
-| `past_tok_ids` | 与缓存压缩相关的历史 token id |
-| `_seen_tokens` | 第 0 层累计见过的 token 数量 |
-| `sep_exrange` | 每层当前 separator 区域的动态结束位置 |
+| 字段                            | 含义                                  |
+| ------------------------------- | ------------------------------------- |
+| `key_cache` / `value_cache` | 每一层实际保存的 KV tensor            |
+| `past_tok_ids`                | 与缓存压缩相关的历史 token id         |
+| `_seen_tokens`                | 第 0 层累计见过的 token 数量          |
+| `sep_exrange`                 | 每层当前 separator 区域的动态结束位置 |
 
 需要注意：`get_seq_length()` 返回的是 `_seen_tokens`，代表累计看过多少 token；`get_usable_length()` 返回当前某一层真实保留的 cache 长度。压缩发生后，这两个数通常不再相等。
 
@@ -402,13 +402,13 @@ ID：sep_tokids + local_tokids
 
 主要区别如下：
 
-| 对比项 | `layer_wise` | `noimg_layer_wise` |
-|---|---|---|
-| initial token id | 保存并参与切片 | 不保存 initial token id |
-| KV/id 索引 | 基本使用相同区间 | token id 区间需减 initial 偏移 |
-| 参数检查 | 调用 `_CHECK_PARAMS_VALIDITY()` | 参数检查被注释以减少开销 |
-| 长度前置检查 | 断言传入 KV 长度等于当前 usable length | 分别取得 KV 长度和 id 长度 |
-| 主更新路径 | 当前未由 `update()` 调用 | 当前由 `update()` 调用 |
+| 对比项           | `layer_wise`                         | `noimg_layer_wise`           |
+| ---------------- | -------------------------------------- | ------------------------------ |
+| initial token id | 保存并参与切片                         | 不保存 initial token id        |
+| KV/id 索引       | 基本使用相同区间                       | token id 区间需减 initial 偏移 |
+| 参数检查         | 调用`_CHECK_PARAMS_VALIDITY()`       | 参数检查被注释以减少开销       |
+| 长度前置检查     | 断言传入 KV 长度等于当前 usable length | 分别取得 KV 长度和 id 长度     |
+| 主更新路径       | 当前未由`update()` 调用              | 当前由`update()` 调用        |
 
 它最终重建的数据为：
 
@@ -472,13 +472,13 @@ ID：initial + separator + local
 
 主要输入：
 
-| 参数 | 含义 |
-|---|---|
-| `layer` | 使用哪一层的归一化和注意力投影参数 |
-| `features` | 当前序列特征，形状通常为 `[B, S, hidden_size]` |
-| `position_ids` | 位置编号；为空时函数内部临时生成 |
-| `attention_mask` | 有效 token 掩码；为空时函数内部临时创建全 1 掩码 |
-| `alpha` / `theta` | 当前实现接收但没有实际使用 |
+| 参数                  | 含义                                             |
+| --------------------- | ------------------------------------------------ |
+| `layer`             | 使用哪一层的归一化和注意力投影参数               |
+| `features`          | 当前序列特征，形状通常为`[B, S, hidden_size]`  |
+| `position_ids`      | 位置编号；为空时函数内部临时生成                 |
+| `attention_mask`    | 有效 token 掩码；为空时函数内部临时创建全 1 掩码 |
+| `alpha` / `theta` | 当前实现接收但没有实际使用                       |
 
 返回值：
 
