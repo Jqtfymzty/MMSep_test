@@ -67,10 +67,7 @@ def graph_rank_separators(
         cur_key_states = key_states[i][:, image_index:image_index+self.image_tokens[i], :]
         cur_query_states = query_states[i]
 
-        if self.training:
-            pass
-        else:
-            text_query_states = cur_query_states[:,-1,:].unsqueeze(1)  # (num_head, 1, head_dim)
+        text_query_states = cur_query_states[:,-1,:].unsqueeze(1)  # (num_head, 1, head_dim)
 
         attn_weights = torch.matmul(text_query_states, cur_key_states.transpose(1, 2)) / math.sqrt(head_dim) #(num_head, text_token, seq_len)
         # attn_weights = attn_weights + text_attention_mask
