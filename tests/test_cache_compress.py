@@ -1,4 +1,4 @@
-"""成员 B：MMSepCache 历史窗口分隔符提取测试。"""
+"""李晨希：MMSepCache 历史窗口分隔符提取测试。"""
 
 from __future__ import annotations
 

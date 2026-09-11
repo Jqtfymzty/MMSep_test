@@ -1,4 +1,4 @@
-"""成员 B：视觉 token 分隔符筛选测试。"""
+"""李晨希：视觉 token 分隔符筛选测试。"""
 
 from __future__ import annotations
 

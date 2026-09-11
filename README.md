@@ -82,7 +82,7 @@ python -m pytest tests\文件名.py -v
 ## 协作约定
 
 - 成员 A 负责 `auto_eval.py` 和 `cache.py` 基础功能测试。
-- 成员 B 负责 `cache.py` 压缩功能和 `mm_separators.py` 测试。
+- 李晨希负责 `cache.py` 压缩功能和 `mm_separators.py` 测试。
 - 共用 fixture 应采用清晰的命名前缀，避免覆盖对方内容。
 - 每个提交只包含一个完整、可说明的工作单元。
 - 提交前先查看 `git diff`，确认没有密钥、缓存、模型权重或无关文件。

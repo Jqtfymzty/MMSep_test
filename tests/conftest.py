@@ -1,6 +1,6 @@
 """Shared pytest fixtures for the MMSep test project.
 
-Member B fixtures use the ``cache_compress_`` and ``mmsep_`` prefixes so that
+Li Chenxi's fixtures use the ``cache_compress_`` and ``mmsep_`` prefixes so that
 Member A can add independent fixtures without naming collisions.
 """
 
