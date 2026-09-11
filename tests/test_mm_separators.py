@@ -204,3 +204,40 @@ def test_batch_with_different_visual_lengths_is_padded_consistently(
     assert result.shape == (2, 7, 8)
     assert new_position_ids.shape == (2, 7)
     assert new_mask.shape == (2, 7)
+
+
+def test_right_padding_does_not_change_visual_token_ranking(
+    mmsep_model_factory: Callable[..., object],
+) -> None:
+    """Masked padding content must not participate in visual-token ranking."""
+
+    attention_mask = torch.tensor(
+        [[1, 1, 1, 1, 1, 1, 1, 1, 0, 0]], dtype=torch.long
+    )
+    position_ids = torch.arange(10, dtype=torch.long).unsqueeze(0)
+    base_features = torch.zeros((1, 10, 8), dtype=torch.float32)
+
+    # Six visual tokens occupy positions 1..6. Position 7 is the last valid
+    # text token, while positions 8 and 9 are right-padding positions.
+    for visual_offset in range(6):
+        base_features[0, visual_offset + 1, :] = visual_offset + 1
+    base_features[0, 7, :] = 3.0
+
+    selected_positions = []
+    for padding_value in (100.0, -100.0):
+        features = base_features.clone()
+        features[0, 9, :] = padding_value
+        model = mmsep_model_factory(image_tokens=[6], image_token_posi=[1])
+
+        graph_rank_separators(
+            model,
+            alpha=0.0,
+            theta=0.0,
+            layer=0,
+            features=features,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+        )
+        selected_positions.append(model.visual_sep_pos.tolist())
+
+    assert selected_positions[0] == selected_positions[1]
