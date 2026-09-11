@@ -1,6 +1,6 @@
 # 成员 B 缺陷复现记录
 
-> 当前状态：修复前记录。
+> 当前状态：四项缺陷均已完成修复前复现和修复后回归。
 >
 > 本文内容来自本地实际执行结果。正式写入缺陷报告模板前，应由成员 B 再次复现、截图，并用自己的语言补充影响分析。
 
@@ -22,7 +22,7 @@ cd "C:\Users\Administrator\OneDrive\Desktop\课程任务\软件质量测试\MMSe
 & ".\.venv\Scripts\python.exe" -m pytest tests\test_mm_separators.py -v --tb=short
 ```
 
-本轮执行结果：
+前三项缺陷首次集中执行结果：
 
 ```text
 9 collected
@@ -77,7 +77,7 @@ attention_mask_list.append(attention_mask[i])
 
 ### 当前状态
 
-已修复。无图像分支不再提前访问尚未创建的 `attention_mask_list`，而是在统一重建阶段保留原 mask 并重新生成有效位置编号。对应测试已由失败转为通过。
+已修复。无图像分支不再提前访问尚未创建的 `attention_mask_list`，而是在统一重建阶段保留原 mask 并重新生成有效位置编号。对应测试已由失败转为通过。修复提交：`669ece8`。
 
 ## 3. B-DEF-02：训练模式下 Query 变量没有赋值
 
@@ -107,7 +107,7 @@ python -m pytest tests\test_mm_separators.py::test_training_mode_can_rank_visual
 
 函数应明确支持训练状态，或者在不支持训练状态时抛出说明清楚的受控异常，不应因局部变量未赋值而崩溃。
 
-当前测试按“训练状态同样可以完成筛选”的预期编写。
+当前测试按“训练状态同样可以完成筛选”的预期编写。由于项目说明没有完整界定训练支持范围，本项应注明为训练入口被调用时出现的条件性缺陷；即使不支持训练，也应给出明确的受控异常，而不是引用未赋值变量。
 
 ### 实际结果
 
@@ -131,7 +131,7 @@ else:
 
 ### 当前状态
 
-已修复。训练和推理路径现在都会为 `text_query_states` 选择序列末尾的 Query，避免后续注意力计算引用未赋值变量。对应训练模式测试已由失败转为通过。
+已修复。训练和推理路径现在都会为 `text_query_states` 赋值，避免后续注意力计算引用未赋值变量。对应训练模式测试已由失败转为通过。修复提交：`e271b37`。
 
 ## 4. B-DEF-03：不同视觉长度的 batch 无法堆叠 attention mask
 
@@ -180,9 +180,59 @@ torch.stack(attention_mask_list, dim=0)
 
 ### 当前状态
 
-已修复。每条重建后的 attention mask 现在都会在右侧补零到 batch 的 `max_len`，再执行 `torch.stack()`；补齐方式与 feature 保持一致。对应多 batch 测试已由失败转为通过。
+已修复。每条重建后的 attention mask 现在都会在右侧补零到 batch 的 `max_len`，再执行 `torch.stack()`；补齐方式与 feature 保持一致。对应多 batch 测试已由失败转为通过。修复提交：`8e5b758`。
 
-## 5. 本轮通过的行为
+## 5. B-DEF-04：右侧 padding 内容干扰视觉 token 排序
+
+### 缺陷位置
+
+`src/mm_separators.py` 原第 70 行附近。
+
+### 前置条件
+
+- 输入使用源码明确接受的右侧 padding；
+- `attention_mask` 中序列末尾存在值为 0 的无效位置；
+- 当前记录包含视觉 token。
+
+### 复现用例
+
+```text
+test_right_padding_does_not_change_visual_token_ranking
+```
+
+单独复现：
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m pytest tests\test_mm_separators.py::test_right_padding_does_not_change_visual_token_ranking -v
+```
+
+### 预期结果
+
+两次输入的有效 token、视觉 token 和 `attention_mask` 完全相同，只修改 mask 值为 0 的 padding 向量时，视觉 token 排名和选择位置应保持不变。
+
+### 实际结果
+
+```text
+E assert [6] == [1]
+```
+
+将最后一个无效 padding 向量设为 `100.0` 时选择位置 `[6]`，设为 `-100.0` 时选择位置 `[1]`。无效 padding 的内容改变了视觉筛选结果。
+
+### 初步原因
+
+原实现虽然接收 `attention_mask`，却固定使用物理序列末尾的 Query：
+
+```python
+text_query_states = cur_query_states[:, -1, :].unsqueeze(1)
+```
+
+右侧 padding 时，索引 `-1` 对应的可能是无效 padding，而不是注释所说的最后一个有效文本 token。
+
+### 当前状态
+
+已修复。实现根据每条 `attention_mask` 的有效 token 数量确定最后有效位置，再提取 Query；若 mask 中不存在有效 token，则抛出说明明确的 `ValueError`。失败测试提交：`e456f29`，修复提交：`518c1a0`。
+
+## 6. 本轮通过的行为
 
 以下 6 项未发现异常：
 
@@ -193,20 +243,23 @@ torch.stack(attention_mask_list, dim=0)
 5. 左侧 padding 被明确拒绝；
 6. 非 `flash_attention_2` 注意力类型被明确拒绝。
 
-## 6. 修复验证计划
+## 7. 修复前历史版本复核
 
-下一阶段按以下顺序处理：
+为避免当前已修复源码影响结论，前三项使用临时 Git worktree 检出测试提交 `80f1f38`，并先输出实际导入的模块路径。确认加载的是历史工作树中的 `src/mm_separators.py` 后，运行三个目标测试，结果为：
 
-1. 保留当前失败结果或截图作为修复前证据；
-2. 分别修改三个问题对应的最小代码区域；
-3. 先单独运行对应失败用例；
-4. 再运行 `test_mm_separators.py`；
-5. 最后运行全部测试，确认缓存压缩功能没有回归；
-6. 把修复后结果、提交编号和截图补充到正式缺陷报告。
+```text
+3 collected
+3 failed
+B-DEF-01: UnboundLocalError (attention_mask_list)
+B-DEF-02: UnboundLocalError (text_query_states)
+B-DEF-03: RuntimeError (mask 长度分别为 5 和 7)
+```
 
-## 7. 修复后回归结果
+B-DEF-04 在失败测试提交 `e456f29` 上单独执行，得到 `[6] != [1]`，因此四项均有修复前的实际失败结果，不是仅根据源码阅读作出的推测。
 
-三个缺陷分别完成最小范围修改后，执行：
+## 8. 修复后回归结果
+
+四个缺陷分别完成最小范围修改后，使用项目锁定的虚拟环境执行：
 
 ```powershell
 & ".\.venv\Scripts\python.exe" -m pytest tests -v
@@ -215,8 +268,10 @@ torch.stack(attention_mask_list, dim=0)
 实际回归结果：
 
 ```text
-26 collected
-26 passed in 0.13s
+27 collected
+27 passed in 0.19s
 ```
 
-缓存压缩的 17 条测试和视觉筛选的 9 条测试均通过，未发现由本轮三个修复引入的回归问题。对应提交编号可在最终整理正式缺陷报告时从 `git log --oneline` 中填写。
+缓存压缩的 17 条测试和视觉筛选的 10 条测试均通过，未发现由本轮四个修复引入的回归问题。
+
+注意：直接执行系统环境中的 `python -m pytest` 时，系统安装的 Transformers 版本可能高于项目锁定的 `4.50.3`，会在 `MMSepCache` 初始化阶段产生接口兼容错误。这属于测试环境偏差，不计入本轮功能缺陷。复现和回归应统一使用 `.venv\Scripts\python.exe`。
