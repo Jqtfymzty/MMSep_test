@@ -180,7 +180,7 @@ torch.stack(attention_mask_list, dim=0)
 
 ### 当前状态
 
-已复现，尚未修复。
+已修复。每条重建后的 attention mask 现在都会在右侧补零到 batch 的 `max_len`，再执行 `torch.stack()`；补齐方式与 feature 保持一致。对应多 batch 测试已由失败转为通过。
 
 ## 5. 本轮通过的行为
 
@@ -203,3 +203,20 @@ torch.stack(attention_mask_list, dim=0)
 4. 再运行 `test_mm_separators.py`；
 5. 最后运行全部测试，确认缓存压缩功能没有回归；
 6. 把修复后结果、提交编号和截图补充到正式缺陷报告。
+
+## 7. 修复后回归结果
+
+三个缺陷分别完成最小范围修改后，执行：
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m pytest tests -v
+```
+
+实际回归结果：
+
+```text
+26 collected
+26 passed in 0.13s
+```
+
+缓存压缩的 17 条测试和视觉筛选的 9 条测试均通过，未发现由本轮三个修复引入的回归问题。对应提交编号可在最终整理正式缺陷报告时从 `git log --oneline` 中填写。

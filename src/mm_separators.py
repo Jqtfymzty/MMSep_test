@@ -103,8 +103,21 @@ def graph_rank_separators(
 
         if self.image_token_posi[i] == -1:
             new_attention_mask = attention_mask[i]
-            attention_mask_list.append(new_attention_mask)
             valid_len = new_attention_mask.sum().item()
+            mask_padding = max_len - new_attention_mask.shape[0]
+            if mask_padding > 0:
+                new_attention_mask = torch.cat(
+                    [
+                        new_attention_mask,
+                        torch.zeros(
+                            mask_padding,
+                            dtype=new_attention_mask.dtype,
+                            device=new_attention_mask.device,
+                        ),
+                    ],
+                    dim=0,
+                )
+            attention_mask_list.append(new_attention_mask)
             position_ids[i, :valid_len] = torch.arange(
                 0,
                 valid_len,
@@ -118,8 +131,21 @@ def graph_rank_separators(
                 attention_mask[i][self.image_token_posi[i]:self.image_token_posi[i]+rank_length[i]], # kept image tokens
                 attention_mask[i][self.image_token_posi[i]+self.image_tokens[i]:]   # after image tokens
             ], dim=0)
-        attention_mask_list.append(new_attention_mask)
         cur_len = new_attention_mask.sum().item()
+        mask_padding = max_len - new_attention_mask.shape[0]
+        if mask_padding > 0:
+            new_attention_mask = torch.cat(
+                [
+                    new_attention_mask,
+                    torch.zeros(
+                        mask_padding,
+                        dtype=new_attention_mask.dtype,
+                        device=new_attention_mask.device,
+                    ),
+                ],
+                dim=0,
+            )
+        attention_mask_list.append(new_attention_mask)
         position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)  # the position ids before image token merging
         self.image_tokens[i] = rank_length[i] # update image token number
 
