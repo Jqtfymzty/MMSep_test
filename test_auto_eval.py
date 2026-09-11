@@ -14,6 +14,8 @@ from uuid import uuid4
 
 import pytest
 
+# pytest 的系统临时目录在部分 Windows 环境中没有写权限，因此测试使用项目内目录。
+
 
 @pytest.fixture
 def local_tmp_path():
@@ -27,6 +29,7 @@ def local_tmp_path():
         shutil.rmtree(path, ignore_errors=True)
 
 
+## 导入被测模块：缺少 Ark SDK 时注入替身，测试不依赖网络或 API Key。
 def _load_auto_eval():
     """Allow the unit tests to run even when the optional Ark SDK is absent."""
     try:
@@ -47,6 +50,7 @@ def _load_auto_eval():
 auto_eval = _load_auto_eval()
 
 
+## 数据分块测试：覆盖正常输入和边界参数。
 def test_split_list_evenly_enough():
     assert auto_eval.split_list(list(range(7)), 3) == [[0, 1, 2], [3, 4, 5], [6]]
 
@@ -72,6 +76,7 @@ def test_get_chunk_rejects_invalid_index():
         auto_eval.get_chunk([1, 2], 2, 2)
 
 
+## 文件读取测试：使用临时 JSONL，验证正常读取和文件不存在异常。
 def test_load_reference_and_answer_reads_jsonl(local_tmp_path):
     reference = local_tmp_path / "reference.jsonl"
     answer = local_tmp_path / "answer.jsonl"
@@ -118,6 +123,7 @@ def test_doubao_prompt_img_contains_image_and_question():
     assert "Question" in prompt[1]["text"]
 
 
+## 以下类模拟 Ark SDK 返回对象，避免测试真实网络接口。
 class _Response:
     class _Choice:
         class _Message:
@@ -165,6 +171,7 @@ def test_doubao_chat_step_txt_handles_api_error():
     assert auto_eval.doubao_chat_step_txt(_FailingClient(), "prompt") == "-1 -1\nError during evaluation."
 
 
+## 评分解析测试：覆盖正常分数、浮点分数和非法响应。
 def test_parse_score_relative_float_and_explanation():
     scores, explanation = auto_eval.parse_score("8.5 7\nGood comparison.")
     assert scores == [8, 7]
@@ -183,6 +190,7 @@ def test_parse_score_absolute_mode():
     assert explanation == "Clear answer."
 
 
+## 端到端测试：验证读取、调用 Mock、解析评分和写出 JSONL。
 def test_eval_doubao_review_writes_jsonl_result(local_tmp_path, monkeypatch):
     reference = local_tmp_path / "reference.jsonl"
     answer = local_tmp_path / "answer.jsonl"
