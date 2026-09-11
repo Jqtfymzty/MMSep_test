@@ -7,11 +7,14 @@ Member A can add independent fixtures without naming collisions.
 from __future__ import annotations
 
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 import torch
+from torch import nn
 
 from src.cache import MMSepCache
+from src import mm_separators
 
 
 @pytest.fixture
@@ -105,3 +108,70 @@ def mmsep_attention_mask() -> torch.Tensor:
         ],
         dtype=torch.long,
     )
+
+
+class _DummySelfAttention(nn.Module):
+    """Small attention projection used only to exercise separator ranking."""
+
+    def __init__(self, hidden_size: int = 8, num_heads: int = 2) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.num_key_value_heads = num_heads
+        self.head_dim = hidden_size // num_heads
+        self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        with torch.no_grad():
+            self.q_proj.weight.copy_(torch.eye(hidden_size))
+            self.k_proj.weight.copy_(torch.eye(hidden_size))
+
+    def rotary_emb(
+        self, key_states: torch.Tensor, position_ids: torch.Tensor
+    ) -> tuple[None, None]:
+        return None, None
+
+
+@pytest.fixture
+def mmsep_model_factory(monkeypatch: pytest.MonkeyPatch) -> Callable[..., object]:
+    """Return a minimal model object required by ``graph_rank_separators``."""
+
+    def identity_rotary(
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        cos: object,
+        sin: object,
+        position_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return query_states, key_states
+
+    monkeypatch.setattr(
+        mm_separators,
+        "apply_rotary_pos_emb",
+        identity_rotary,
+        raising=False,
+    )
+
+    def _factory(
+        *,
+        image_tokens: list[int] | None = None,
+        image_token_posi: list[int] | None = None,
+        padding_side: str = "right",
+        attention_type: str = "flash_attention_2",
+        training: bool = False,
+    ) -> object:
+        layer = SimpleNamespace(
+            input_layernorm=nn.Identity(),
+            self_attn=_DummySelfAttention(),
+        )
+        return SimpleNamespace(
+            config=SimpleNamespace(tokenizer_padding_side=padding_side),
+            image_tokens=image_tokens if image_tokens is not None else [6],
+            image_token_posi=(
+                image_token_posi if image_token_posi is not None else [2]
+            ),
+            layers=[layer],
+            attention_type=attention_type,
+            training=training,
+            visual_sep_pos=None,
+        )
+
+    return _factory
