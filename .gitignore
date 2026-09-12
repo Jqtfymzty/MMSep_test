@@ -1,0 +1,12 @@
+~$auto_eval测试用例清单.xlsx
+__pycache__/auto_eval.cpython-312.pyc
+__pycache__/auto_eval.cpython-314.pyc
+__pycache__/cache_fixed.cpython-312.pyc
+__pycache__/cache.cpython-312.pyc
+__pycache__/cache.cpython-314.pyc
+__pycache__/test_auto_eval.cpython-312-pytest-9.1.1.pyc
+__pycache__/test_auto_eval.cpython-314-pytest-9.1.1.pyc
+__pycache__/test_auto_eval.cpython-314.pyc
+__pycache__/test_cache_basic.cpython-312-pytest-9.1.1.pyc
+__pycache__/test_cache_basic.cpython-314-pytest-9.1.1.pyc
+__pycache__/test_cache_fixed_run.cpython-312-pytest-9.1.1.pyc
