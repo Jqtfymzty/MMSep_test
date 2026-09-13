@@ -202,8 +202,23 @@ def test_batch_with_different_visual_lengths_is_padded_consistently(
     )
 
     assert result.shape == (2, 7, 8)
-    assert new_position_ids.shape == (2, 7)
-    assert new_mask.shape == (2, 7)
+    assert new_position_ids.tolist() == [
+        [0, 1, 2, 3, 4, 0, 0],
+        [0, 1, 2, 3, 4, 0, 0],
+    ]
+    assert new_mask.tolist() == [
+        [1, 1, 1, 1, 1, 0, 0],
+        [1, 1, 1, 1, 1, 0, 0],
+    ]
+
+    expected_first = torch.cat(
+        [mmsep_features[0, [0, 1, 7, 8, 9], :], torch.zeros((2, 8))],
+        dim=0,
+    )
+    expected_second = mmsep_features[1, [0, 1, 5, 6, 7, 8, 9], :]
+    torch.testing.assert_close(result[0], expected_first)
+    torch.testing.assert_close(result[1], expected_second)
+    assert model.image_tokens == [1, 0]
 
 
 def test_right_padding_does_not_change_visual_token_ranking(
@@ -240,4 +255,4 @@ def test_right_padding_does_not_change_visual_token_ranking(
         )
         selected_positions.append(model.visual_sep_pos.tolist())
 
-    assert selected_positions[0] == selected_positions[1]
+    assert selected_positions == [[6], [6]]
