@@ -61,17 +61,17 @@ def graph_rank_separators(
         if image_index == -1:
             cur_input_embeds = features[i]
             features_list.append(cur_input_embeds)
-            attention_mask_list.append(attention_mask[i])
             continue
         
         # --------- 1) compute attention scores: last valid text token -> visual tokens ----------
         cur_key_states = key_states[i][:, image_index:image_index+self.image_tokens[i], :]
         cur_query_states = query_states[i]
 
-        if self.training:
-            pass
-        else:
-            text_query_states = cur_query_states[:,-1,:].unsqueeze(1)  # (num_head, 1, head_dim)
+        valid_token_count = int(attention_mask[i].sum().item())
+        if valid_token_count == 0:
+            raise ValueError("attention_mask must contain at least one valid token")
+        last_valid_index = valid_token_count - 1
+        text_query_states = cur_query_states[:,last_valid_index,:].unsqueeze(1)  # (num_head, 1, head_dim)
 
         attn_weights = torch.matmul(text_query_states, cur_key_states.transpose(1, 2)) / math.sqrt(head_dim) #(num_head, text_token, seq_len)
         # attn_weights = attn_weights + text_attention_mask
@@ -104,14 +104,52 @@ def graph_rank_separators(
 
         cur_new_embed = torch.cat([cur_new_embed, torch.zeros((dif, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device)], dim=0)    # pad to max_len
         embeds_padded.append(cur_new_embed)
+
+        if self.image_token_posi[i] == -1:
+            new_attention_mask = attention_mask[i]
+            valid_len = new_attention_mask.sum().item()
+            mask_padding = max_len - new_attention_mask.shape[0]
+            if mask_padding > 0:
+                new_attention_mask = torch.cat(
+                    [
+                        new_attention_mask,
+                        torch.zeros(
+                            mask_padding,
+                            dtype=new_attention_mask.dtype,
+                            device=new_attention_mask.device,
+                        ),
+                    ],
+                    dim=0,
+                )
+            attention_mask_list.append(new_attention_mask)
+            position_ids[i, :valid_len] = torch.arange(
+                0,
+                valid_len,
+                dtype=position_ids.dtype,
+                device=position_ids.device,
+            )
+            continue
         
         new_attention_mask = torch.cat(
             [   attention_mask[i][:self.image_token_posi[i]], # before image tokens
                 attention_mask[i][self.image_token_posi[i]:self.image_token_posi[i]+rank_length[i]], # kept image tokens
                 attention_mask[i][self.image_token_posi[i]+self.image_tokens[i]:]   # after image tokens
             ], dim=0)
-        attention_mask_list.append(new_attention_mask)
         cur_len = new_attention_mask.sum().item()
+        mask_padding = max_len - new_attention_mask.shape[0]
+        if mask_padding > 0:
+            new_attention_mask = torch.cat(
+                [
+                    new_attention_mask,
+                    torch.zeros(
+                        mask_padding,
+                        dtype=new_attention_mask.dtype,
+                        device=new_attention_mask.device,
+                    ),
+                ],
+                dim=0,
+            )
+        attention_mask_list.append(new_attention_mask)
         position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)  # the position ids before image token merging
         self.image_tokens[i] = rank_length[i] # update image token number
 
